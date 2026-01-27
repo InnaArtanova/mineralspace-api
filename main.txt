@@ -21,6 +21,7 @@ from schemas import (
     SpecimenCreateRequest, SpecimenUpdateRequest, Specimen,
     CommentCreateRequest, Comment, MineralReference, Error
 )
+from schemas import Collection as CollectionSchema
 from auth import (
     get_password_hash, verify_password, create_access_token,
     get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES, timedelta
@@ -53,41 +54,22 @@ app.add_middleware(
 )
 
 # === AUTH ===
-@app.post("/auth/register", status_code=status.HTTP_201_CREATED, tags=["Auth"])
-async def register(user_data: UserRegisterRequest, db: AsyncSession = Depends(get_db)):
-    existing = await db.execute(select(User).where(User.email == user_data.email))
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="Email already registered")
-    hashed_pw = get_password_hash(user_data.password)
-    new_user = User(
-        email=user_data.email,
-        name=user_data.name
+@aap.post("/collections", status_code=status.HTTP_201_CREATED, response_model=schemas.Collection, tags=["Collections"])
+async def create_collection(
+    collection_create: schemas.CollectionCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    new_collection = Collection(
+        title=collection_create.title,
+        description=collection_create.description,
+        is_public=collection_create.is_public,
+        owner_id=current_user.id  # ← Передаём ID владельца
     )
-    db.add(new_user)
-    await db.flush()
-
-    # Создаём учётные данные
-    from models import UserCredentials
-    credentials = UserCredentials(
-        user_id=new_user.id,
-        password_hash=get_password_hash(user_data.password)
-    )
-    db.add(credentials)
+    db.add(new_collection)
     await db.commit()
-    await db.refresh(new_user)
-
-    access_token = create_access_token(data={"sub": str(new_user.id)})
-    return {
-        "user": UserProfile(
-            id=new_user.id,
-            name=new_user.name,
-            avatar_url=new_user.avatar_url,
-            bio=new_user.bio,
-            created_at=new_user.created_at,
-            updated_at=new_user.updated_at
-        ),
-        "accessToken": access_token
-    }
+    await db.refresh(new_collection)
+    return new_collection  # ← Просто возвращаем объект — FastAPI сам сериализует
 @app.post("/auth/login", tags=["Auth"])
 async def login(login_data: UserLoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).options(selectinload(User.credentials)) 
@@ -134,7 +116,7 @@ async def delete_me(current_user: User = Depends(get_current_user), db: AsyncSes
     return
 
 # === COLLECTIONS ===
-@app.get("/collections", response_model=List[schemas.Collection])
+@app.get("/collections", response_model=List[CollectionSchema])
 async def list_collections(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
@@ -150,11 +132,11 @@ async def list_collections(
     )
     result = await db.execute(stmt)
     collections = result.scalars().all()
-    return collections  # ← Просто возвращаем список
+    return collections
 
-@app.post("/collections", status_code=status.HTTP_201_CREATED, response_model=schemas.Collection, tags=["Collections"])
+@app.post("/collections", status_code=status.HTTP_201_CREATED, response_model=CollectionSchema, tags=["Collections"])
 async def create_collection(
-    collection_create: schemas.CollectionCreateRequest,
+    collection_create: CollectionCreateRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -162,13 +144,31 @@ async def create_collection(
         title=collection_create.title,
         description=collection_create.description,
         is_public=collection_create.is_public,
-        owner_id=current_user.id  # ← Передаём ID владельца
+        owner_id=current_user.id
     )
     db.add(new_collection)
     await db.commit()
     await db.refresh(new_collection)
-    return new_collection  # ← Просто возвращаем объект — FastAPI сам сериализует
 
+    # Явно загружаем владельца
+    result = await db.execute(
+        select(Collection)
+        .options(selectinload(Collection.owner))
+        .where(Collection.id == new_collection.id)
+    )
+    collection_with_owner = result.scalar_one()
+
+    # ВРУЧНУЮ создаём Pydantic-объект
+    return CollectionSchema(
+        id=collection_with_owner.id,
+        title=collection_with_owner.title,
+        description=collection_with_owner.description,
+        is_public=collection_with_owner.is_public,
+        owner_id=collection_with_owner.owner_id,
+        created_at=collection_with_owner.created_at,
+        updated_at=collection_with_owner.updated_at,
+        # owner_name НЕЛЬЗЯ передать, если он есть в схеме — но лучше его убрать!
+    )
 # === SPECIMENTS ===
 # GET /specimens — все образцы текущего пользователя
 @app.get("/specimens", tags=["Specimens"])
