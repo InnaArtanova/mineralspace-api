@@ -1,24 +1,36 @@
 # main.py
-from fastapi import FastAPI, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import  FastAPI, Depends, HTTPException, status, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, Session
 from uuid import UUID
 from typing import List, Optional
 from sqlalchemy import func, or_, and_
-from fastapi.responses import JSONResponse
+from sqlalchemy import delete, update
+from datetime import datetime
+from wikidata_service import fetch_mineral_from_wikidata, extract_mineral_data
 
-import schemas  # ← добавьте эту строку
+
+import schemas 
+import collections
 
 from database import get_db
-from models import User, Collection, Specimen, Comment, MineralReference, UserCredentials
+from models import (
+    User,
+    Collection as CollectionModel,
+    Specimen as SpecimenModel,
+    Comment,
+    MineralReference,
+    UserCredentials
+)
 from schemas import (
     UserRegisterRequest, UserLoginRequest, UserProfile, UserUpdateRequest,
-    CollectionCreateRequest, CollectionUpdateRequest, Collection as CollectionSchema,
-    SpecimenCreateRequest, SpecimenUpdateRequest, Specimen,
+    CollectionCreateRequest, CollectionUpdateRequest, CollectionResponse as CollectionSchema,
+    SpecimenCreateRequest, SpecimenUpdateRequest, Specimen as SpecimenSchema,
     CommentCreateRequest, Comment, MineralReference, Error
 )
 from auth import (
@@ -40,8 +52,15 @@ app = FastAPI(
         "url": "https://opensource.org/licenses/MIT"
     }
 )
+router = APIRouter()
+router = APIRouter(prefix="/collections", tags=["Collections"])
+
 
 bearer_scheme = HTTPBearer()
+
+async def get_collection_by_id(db: AsyncSession, collection_id: UUID):
+    result = await db.execute(select(Collection).where(Collection.id == collection_id))
+    return result.scalars().first()
 
 # CORS (настройте по необходимости)
 app.add_middleware(
@@ -134,7 +153,7 @@ async def delete_me(current_user: User = Depends(get_current_user), db: AsyncSes
     return
 
 # === COLLECTIONS ===
-@app.get("/collections", response_model=List[schemas.Collection])
+@app.get("/collections", response_model=List[schemas.CollectionResponse], tags=["Collections"])
 async def list_collections(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
@@ -152,7 +171,7 @@ async def list_collections(
     collections = result.scalars().all()
     return collections  # ← Просто возвращаем список
 
-@app.post("/collections", status_code=status.HTTP_201_CREATED, response_model=schemas.Collection, tags=["Collections"])
+@app.post("/collections", status_code=status.HTTP_201_CREATED, response_model=schemas.CollectionResponse, tags=["Collections"])
 async def create_collection(
     collection_create: schemas.CollectionCreateRequest,
     current_user: User = Depends(get_current_user),
@@ -167,41 +186,123 @@ async def create_collection(
     db.add(new_collection)
     await db.commit()
     await db.refresh(new_collection)
-    return new_collection  # ← Просто возвращаем объект — FastAPI сам сериализует
+    return new_collection  
+
+@router.get("/{collection_id}", response_model=CollectionSchema, tags=["Collections"])
+async def get_collection(
+    collection_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    collection = await get_collection_by_id(db, collection_id)
+    if not collection:
+        raise HTTPException(status_code=404, detail="Коллекция не найдена")
+
+    # Проверка доступа: владелец или публичная коллекция
+    if collection.owner_id != current_user.id and not collection.is_public:
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+
+    return collection
+app.include_router(router)
+
+@router.delete(
+    "/{collection_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_collection(  
+    collection_id: UUID,      
+    db: AsyncSession = Depends(get_db),  
+    current_user = Depends(get_current_user),
+):
+    
+
+# Найти коллекцию
+    result = await db.execute(select(Collection).where(Collection.id == collection_id))
+    collection = result.scalars().first()
+
+    if not collection:
+        raise HTTPException(status_code=404, detail="Коллекция не найдена")
+
+    if collection.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Нет прав на удаление")
+
+    # Удалить
+    await db.execute(delete(Collection).where(Collection.id == collection_id))
+    await db.commit()
+
+    return  # 204 No Content
+
+# Редактировать коллекцию
+@router.patch(
+    "/{collection_id}",
+    response_model=CollectionSchema,
+    summary="Частичное обновление коллекции",
+    description="Обновляет указанные поля коллекции. Доступно только владельцу."
+)
+async def update_collection(
+    collection_id: UUID,
+    update_data: CollectionUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    # 1. Найти коллекцию
+    result = await db.execute(select(Collection).where(Collection.id == collection_id))
+    collection = result.scalars().first()
+
+    if not collection:
+        raise HTTPException(status_code=404, detail="Коллекция не найдена")
+
+    # 2. Проверить права
+    if collection.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Нет прав на редактирование")
+
+    # 3. Обновить только переданные поля
+    update_dict = update_data.model_dump(exclude_unset=True) 
+
+    if not update_dict:
+        raise HTTPException(status_code=400, detail="Нет данных для обновления")
+
+    # Применяем изменения к объекту
+    for field, value in update_dict.items():
+        setattr(collection, field, value)
+
+    # 4. Сохранить
+    db.add(collection)
+    await db.commit()
+    await db.refresh(collection)
+
+    return collection
+app.include_router(router)
 
 # === SPECIMENTS ===
-# GET /specimens — все образцы текущего пользователя
-@app.get("/specimens", tags=["Specimens"])
-async def list_user_specimens(
-    page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100),
+@app.get("/specimens/{specimen_id}", response_model=schemas.Specimen, tags=["Specimens"])
+async def get_specimen(
+    specimen_id: UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    offset = (page - 1) * limit
-    stmt = (
-        select(Specimen)
-        .join(Collection, Specimen.collection_id == Collection.id)
-        .where(Collection.owner_id == current_user.id)
-        .offset(offset)
-        .limit(limit)
-    )
-    result = await db.execute(stmt)
-    items = result.scalars().all()
-    total = await db.scalar(
-        select(func.count())
-        .select_from(Specimen)
-        .join(Collection)
-        .where(Collection.owner_id == current_user.id)
-    )
-    return {"items": items, "total": total, "page": page, "limit": limit}
+    specimen = await db.get(SpecimenModel, specimen_id)
+    if not specimen:
+        raise HTTPException(status_code=404, detail="Specimen not found")
+    
+    # Проверка доступа к коллекции (если нужно)
+    collection = await db.get(CollectionModel, specimen.collection_id)
+    if not collection.is_public and collection.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Опционально: подгрузить mineral_data
+    if specimen.mineral_id:
+        mineral_ref = await db.get(MineralReference, specimen.mineral_id)
+        specimen.mineral_data = mineral_ref  # Добавляем как атрибут
+
+    return specimen  # ← Просто возвращаем SQLAlchemy-объект!
 
 
 # POST /collections/{collectionId}/specimens
 @app.post(
     "/collections/{collection_id}/specimens",
     status_code=status.HTTP_201_CREATED,
-    response_model=Specimen,
+    response_model=SpecimenSchema,  # ← Pydantic-схема для ответа
     tags=["Specimens"]
 )
 async def add_specimen_to_collection(
@@ -210,30 +311,37 @@ async def add_specimen_to_collection(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    collection = await db.get(Collection, collection_id)
+    collection = await db.get(CollectionModel, collection_id)  # ← CollectionModel
     if not collection:
         raise HTTPException(status_code=404, detail="Collection not found")
     if collection.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="You do not own this collection")
 
-    specimen = Specimen(
+    # Создаём SQLAlchemy-модель (НЕ Pydantic!)
+    specimen = SpecimenModel(
         collection_id=collection_id,
         **specimen_data.dict(exclude_unset=True)
     )
     db.add(specimen)
     await db.commit()
-    await db.refresh(specimen)
-    return specimen
+    await db.refresh(specimen)  # ← Теперь specimen содержит id, created_at и т.д.
+    
+    # Опционально: подгрузить mineral_data
+    if specimen.mineral_id:
+        mineral_ref = await db.get(MineralReference, specimen.mineral_id)
+        specimen.mineral_data = mineral_ref
+    
+    return specimen  # ← Возвращаем SQLAlchemy-объект, FastAPI сам конвертирует в SpecimenSchema
 
 
 # GET /specimens/{id}
-@app.get("/specimens/{specimen_id}", response_model=Specimen, tags=["Specimens"])
+@app.get("/specimens/{specimen_id}", response_model=SpecimenSchema, tags=["Specimens"])
 async def get_specimen(
     specimen_id: UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    specimen = await db.get(Specimen, specimen_id)
+    specimen = await db.get(SpecimenSchema, specimen_id)
     if not specimen:
         raise HTTPException(status_code=404, detail="Specimen not found")
 
@@ -246,7 +354,7 @@ async def get_specimen(
     if specimen.mineral_id:
         mineral_ref = await db.get(MineralReference, specimen.mineral_id)
 
-    return Specimen(
+    return SpecimenModel(
         id=specimen.id,
         collection_id=specimen.collection_id,
         mineral_id=specimen.mineral_id,
@@ -262,14 +370,14 @@ async def get_specimen(
 
 
 # PATCH /specimens/{id}
-@app.patch("/specimens/{specimen_id}", response_model=Specimen, tags=["Specimens"])
+@app.patch("/specimens/{specimen_id}", response_model=SpecimenSchema, tags=["Specimens"])
 async def update_specimen(
     specimen_id: UUID,
     update_data: SpecimenUpdateRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    specimen = await db.get(Specimen, specimen_id)
+    specimen = await db.get(SpecimenSchema, specimen_id)
     if not specimen:
         raise HTTPException(status_code=404, detail="Specimen not found")
 
@@ -286,7 +394,7 @@ async def update_specimen(
     if specimen.mineral_id:
         mineral_ref = await db.get(MineralReference, specimen.mineral_id)
 
-    return Specimen(
+    return SpecimenSchema(
         id=specimen.id,
         collection_id=specimen.collection_id,
         mineral_id=specimen.mineral_id,
@@ -308,7 +416,7 @@ async def delete_specimen(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    specimen = await db.get(Specimen, specimen_id)
+    specimen = await db.get(SpecimenModel, specimen_id)
     if not specimen:
         raise HTTPException(status_code=404, detail="Specimen not found")
 
@@ -329,7 +437,7 @@ async def create_comment(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    specimen = await db.get(Specimen, comment_data.specimen_id)
+    specimen = await db.get(SpecimenSchema, comment_data.specimen_id)
     if not specimen:
         raise HTTPException(status_code=404, detail="Specimen not found")
 
@@ -380,9 +488,41 @@ async def get_mineral_types(db: AsyncSession = Depends(get_db)):
 # Аналогично для /reference/hardness, /cleavages и др.
 
 # === MINERALS ===
-@app.get("/minerals/{mineral_id}", response_model=MineralReference, tags=["Minerals"])
+@app.get("/minerals/{mineral_id}", response_model=schemas.MineralReference, tags=["Minerals"])
 async def get_mineral(mineral_id: str, db: AsyncSession = Depends(get_db)):
+    # Проверяем, есть ли запись в БД
     mineral = await db.get(MineralReference, mineral_id)
-    if not mineral:
-        raise HTTPException(status_code=404, detail="Mineral not found")
-    return mineral
+    
+    if mineral:
+        return mineral
+
+    # Если нет — пробуем загрузить из Wikidata
+    if mineral_id.startswith("wikidata:"):
+        wikidata_key = mineral_id.split(":", 1)[1]  # "Q123456"
+        entity = fetch_mineral_from_wikidata(wikidata_key)
+        
+        if not entity:
+            raise HTTPException(status_code=404, detail="Mineral not found in Wikidata")
+        
+        data = extract_mineral_data(entity)
+        
+        # Создаём новую запись
+        new_mineral = MineralReference(
+            id=mineral_id,
+            name_ru=data["name_ru"],
+            name_en=data["name_en"],
+            chemical_formula=data["chemical_formula"],
+            mineral_type_id=data["mineral_type_id"],
+            hardness_id=data["hardness_id"],
+            cleavage_id=data["cleavage_id"],
+            crystal_system_id=data["crystal_system_id"],
+            crystal_form_id=data["crystal_form_id"],
+            source="wikidata",
+            last_synced_at=datetime.utcnow()
+        )
+        db.add(new_mineral)
+        await db.commit()
+        await db.refresh(new_mineral)
+        return new_mineral
+    
+    raise HTTPException(status_code=404, detail="Mineral not found")

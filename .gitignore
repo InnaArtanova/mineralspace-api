@@ -1,30 +1,60 @@
-# Секреты
+# Секреты и конфигурация
 .env
 .env.local
-secret.env
 *.env
 
-
-# Виртуальное окружение
-venv/
-venv*/
-.env/
-
-# Кэш Python
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
-.pytest_cache/
-.coverage
-htmlcov/
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# IDE
+# Виртуальное окружение (venv)
+venv/
+ENV/
+.env
+.venv/
+venv*/
+
+# IDE / редакторы
 .vscode/
 .idea/
+*.swp
+*.swo
 .DS_Store
+Thumbs.db
 
-# ОС и редакторы
+# Логи и временные файлы
+*.log
+logs/
+debug.log
+profile_output.txt
+
+# База данных (если используете SQLite локально)
+*.sqlite3
+*.db
+
+# ОС
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db

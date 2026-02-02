@@ -1,5 +1,5 @@
 # models.py
-from sqlalchemy import Column, String, Boolean, DateTime, Text, ForeignKey, Integer, JSON
+from sqlalchemy import Column, String, Boolean, DateTime, Text, ForeignKey, Integer, JSON, Float
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
@@ -15,9 +15,12 @@ class User(Base):
     name = Column(String(100), nullable=False)
     avatar_url = Column(String)
     bio = Column(Text)
-    phone_number = Column(String(20))
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), 
+        server_default=func.now(),  # ← ДОБАВИТЬ ЭТО
+        onupdate=func.now(),         # ← ОСТАВИТЬ ЭТО
+        nullable=False)
 
     # Связь с учётными данными
     credentials = relationship("UserCredentials", back_populates="user", uselist=False)
@@ -38,9 +41,12 @@ class Collection(Base):
     description = Column(Text)
     is_public = Column(Boolean, default=True)
     owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
-
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), 
+        server_default=func.now(),  # ← ДОБАВИТЬ ЭТО
+        onupdate=func.now(),         # ← ОСТАВИТЬ ЭТО
+        nullable=False)
     # Связь с владельцем
     owner = relationship("User", back_populates="collections")
 
@@ -51,11 +57,16 @@ class Specimen(Base):
     mineral_id = Column(String, nullable=False)  # e.g., "mindat:quartz"
     local_name = Column(String(100))
     region = Column(String(100), nullable=False)
-    location = Column(JSON)  # GeoJSON Point
+    latitude = Column(Float)
+    longitude = Column(Float)
     found_at = Column(String)  # ISO date string
     photo_url = Column(String)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), 
+        server_default=func.now(),  # ← ДОБАВИТЬ ЭТО
+        onupdate=func.now(),         # ← ОСТАВИТЬ ЭТО
+        nullable=False)
 
 class Comment(Base):
     __tablename__ = "comments"
@@ -63,8 +74,12 @@ class Comment(Base):
     specimen_id = Column(UUID(as_uuid=True), ForeignKey("specimens.id"), nullable=False)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     text = Column(Text, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), 
+        server_default=func.now(),  # ← ДОБАВИТЬ ЭТО
+        onupdate=func.now(),         # ← ОСТАВИТЬ ЭТО
+        nullable=False)
 
 # --- Reference Data (read-only) ---
 class MineralType(Base):
