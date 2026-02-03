@@ -23,6 +23,8 @@ venv/
 ENV/
 .env
 .venv/
+secret.env
+*.env
 
 # Исходный код Python
 *.py
